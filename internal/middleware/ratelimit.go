@@ -7,17 +7,27 @@ import (
 	"github.com/SOliyhan/distributed-rate-limiter/internal/limiter"
 )
 
-func RateLimit(store *limiter.BucketStore) func(http.Handler) http.Handler {
+func RateLimitRedis(
+	redisLimiter *limiter.RedisLimiter,
+	fallback *limiter.BucketStore,
+) func(http.Handler) http.Handler {
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+			allowed, err := redisLimiter.Allow(r.Context(), ip)
 			if err != nil {
-				http.Error(w, "invalid IP", http.StatusInternalServerError)
+				// Redis down then fallback to memory
+				if !fallback.Get(ip).Allow() {
+					http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+					return
+				}
+				next.ServeHTTP(w, r)
 				return
 			}
 
-			bucket := store.Get(ip)
-			if !bucket.Allow() {
+			if !allowed {
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return
 			}
